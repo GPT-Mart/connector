@@ -1,0 +1,13 @@
+{
+  "name": "gptmart-api",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "uuid": "^9.0.1"
+  }
+}

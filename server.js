@@ -220,12 +220,14 @@ function setCORS(req, res) {
       }
 
       // PUBLIC LIST (no auth)
-      if (url.pathname === '/api/gpts/public' && method === 'GET') {
-        const db = await readDB();
-        const publicItems = db.items.filter(i => i.status === 'live');
-        res.writeHead(200).end(JSON.stringify({ settings: db.settings, items: publicItems }));
-        return;
-      }
+ if (url.pathname === '/api/gpts/public' && method === 'GET') {
+  console.log('Public API hit from:', req.headers.origin || '(no origin)');
+  const db = await readDB();
+  const publicItems = db.items.filter(i => i.status === 'live');
+  res.writeHead(200).end(JSON.stringify({ settings: db.settings, items: publicItems }));
+  return;
+}
+
 
       // AUTH (cookie or bearer)
       const authHeader = req.headers['authorization'];

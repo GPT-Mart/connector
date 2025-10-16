@@ -1,3 +1,4 @@
+// server.js
 const http = require('http');
 const fs = require('fs').promises;
 const path = require('path');
@@ -18,7 +19,7 @@ async function startServer() {
     try {
       const data = await fs.readFile(DB_PATH, 'utf8');
       return JSON.parse(data);
-    } catch (error) {
+    } catch {
       // Seed on first run
       const allGpts = [
         { title:"jQuery Tutor", desc:"Learn and master jQuery: selectors, events, animations, DOM, AJAX, plugins, debugging, and modern alternatives.", icon:"https://www.vectorlogo.zone/logos/jquery/jquery-icon.svg", categories:["Frontend","Tools"], url:"https://chatgpt.com/g/g-68b859c4f6f88191b05a4effe7d2140a-jquery-tutor"},
@@ -76,7 +77,6 @@ async function startServer() {
         { title:"Code-to-Rap GPT", desc:"Explains code by rapping about it.", icon:"https://cdn-icons-png.flaticon.com/512/2769/2769747.png", categories:["Humor","Learning"], url:"https://chatgpt.com/g/g-68dab7f617cc819198b1432fe32cf307-code-to-rap-gpt?model=gpt-5"},
         { title:"Bug Meme GPT", desc:"Turns bugs into instant memes.", icon:"https://cdn-icons-png.flaticon.com/512/3221/3221614.png", categories:["Humor","Tools"], url:"https://chatgpt.com/g/g-68dab3b8cebc819180d1b629ab574579-bug-meme-gpt?model=gpt-5"}
       ];
-
       const formattedGpts = allGpts.map(item => ({
         id: uuidv4(),
         createdAt: Date.now() - Math.floor(Math.random() * 1000000),
@@ -89,7 +89,6 @@ async function startServer() {
         tags: item.tags || [],
         url: item.url,
       }));
-
       const defaultData = { settings: { title: "GPTMart" }, items: formattedGpts };
       await writeDB(defaultData);
       return defaultData;
@@ -99,12 +98,8 @@ async function startServer() {
   // --- ATOMIC WRITES W/ QUEUE ---
   let isWriting = false;
   const writeQueue = [];
-
   async function writeDB(data) {
-    if (isWriting) {
-      writeQueue.push(data);
-      return;
-    }
+    if (isWriting) { writeQueue.push(data); return; }
     isWriting = true;
     try {
       const tmpPath = DB_PATH + '.tmp';
@@ -112,10 +107,7 @@ async function startServer() {
       await fs.rename(tmpPath, DB_PATH); // atomic replace
     } finally {
       isWriting = false;
-      if (writeQueue.length > 0) {
-        const nextData = writeQueue.shift();
-        writeDB(nextData);
-      }
+      if (writeQueue.length > 0) writeDB(writeQueue.shift());
     }
   }
 
@@ -131,16 +123,6 @@ async function startServer() {
     if (s && s.expires > Date.now()) return s.user;
     if (s) delete sessions[token];
     return null;
-  }
-  function getCookieToken(req) {
-    const raw = req.headers.cookie || '';
-    const jar = Object.fromEntries(
-      raw.split(';').map(v => v.trim()).filter(Boolean).map(kv => {
-        const i = kv.indexOf('=');
-        return [kv.slice(0, i), decodeURIComponent(kv.slice(i + 1))];
-      })
-    );
-    return jar.session || null;
   }
 
   // constant-time PIN compare
@@ -159,21 +141,13 @@ async function startServer() {
       req.on('end', () => {
         const ct = (req.headers['content-type'] || '').toLowerCase();
         try {
-          if (ct.includes('application/json')) {
-            resolve(JSON.parse(body || '{}'));
-          } else if (ct.includes('application/x-www-form-urlencoded')) {
-            resolve(querystring.parse(body));
-          } else {
-            // Try JSON then fallback to plain
-            try {
-              resolve(JSON.parse(body || '{}'));
-            } catch {
-              resolve({ raw: body });
-            }
+          if (ct.includes('application/json')) resolve(JSON.parse(body || '{}'));
+          else if (ct.includes('application/x-www-form-urlencoded')) resolve(querystring.parse(body));
+          else {
+            try { resolve(JSON.parse(body || '{}')); }
+            catch { resolve({ raw: body }); }
           }
-        } catch (e) {
-          reject(e);
-        }
+        } catch (e) { reject(e); }
       });
       req.on('error', reject);
     });
@@ -196,8 +170,19 @@ async function startServer() {
 
     // CORS + preflight
     setCORS(req, res);
-    if (method === 'OPTIONS') {
-      res.writeHead(204).end();
+    if (method === 'OPTIONS') { res.writeHead(204).end(); return; }
+
+    // Helpful root page
+    if (url.pathname === '/' && method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+         .end('GPTMart connector is running. Try /api/gpts/public or /api/health');
+      return;
+    }
+
+    // Health check
+    if (url.pathname === '/api/health' && method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+         .end(JSON.stringify({ ok: true }));
       return;
     }
 
@@ -205,7 +190,7 @@ async function startServer() {
     if (url.pathname.startsWith('/api/')) {
       res.setHeader('Content-Type', 'application/json');
 
-      // LOGIN (accept JSON or form)
+      // LOGIN (accept JSON or form) — cross-site cookie enabled
       if (url.pathname === '/api/login' && method === 'POST') {
         try {
           const body = await parseBody(req);
@@ -213,29 +198,28 @@ async function startServer() {
           if (checkPin(pin)) {
             const token = createToken({ user: 'admin' });
 
-            // set httpOnly cookie for browsers
-            const isSecure = (req.headers['x-forwarded-proto'] || '').includes('https');
+            // Always send cross-site capable cookie
             const cookie = [
               `session=${encodeURIComponent(token)}`,
               'HttpOnly',
               'Path=/',
-              'SameSite=Lax',
-              isSecure ? 'Secure' : null,
+              'SameSite=None',  // <-- allow cross-site
+              'Secure',         // <-- required with SameSite=None
               'Max-Age=3600'
-            ].filter(Boolean).join('; ');
+            ].join('; ');
             res.setHeader('Set-Cookie', cookie);
 
             res.writeHead(200).end(JSON.stringify({ success: true, token }));
           } else {
             res.writeHead(401).end(JSON.stringify({ error: 'Invalid PIN' }));
           }
-        } catch (e) {
+        } catch {
           res.writeHead(400).end(JSON.stringify({ error: 'Invalid request body' }));
         }
         return;
       }
 
-      // PUBLIC LIST
+      // PUBLIC LIST (no auth)
       if (url.pathname === '/api/gpts/public' && method === 'GET') {
         const db = await readDB();
         const publicItems = db.items.filter(i => i.status === 'live');
@@ -243,15 +227,18 @@ async function startServer() {
         return;
       }
 
-      // AUTH (Bearer or Cookie)
+      // AUTH (cookie or bearer)
       const authHeader = req.headers['authorization'];
       const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-      const cookieTok = getCookieToken(req);
+
+      // parse cookie header for "session="
+      const cookieHeader = req.headers.cookie || '';
+      const cookieTok = cookieHeader.split(';').map(s => s.trim())
+        .map(kv => kv.split('='))
+        .reduce((acc,[k,v]) => (k==='session' ? decodeURIComponent(v||'') : acc), null);
+
       const user = verifyTokenValue(bearer || cookieTok);
-      if (!user) {
-        res.writeHead(401).end(JSON.stringify({ error: 'Unauthorized' }));
-        return;
-      }
+      if (!user) { res.writeHead(401).end(JSON.stringify({ error: 'Unauthorized' })); return; }
 
       // Mutating / admin routes
       const db = await readDB();
@@ -296,14 +283,14 @@ async function startServer() {
           } else {
             res.writeHead(404).end(JSON.stringify({ error: 'API route not found' }));
           }
-        } catch (e) {
+        } catch {
           res.writeHead(500).end(JSON.stringify({ error: 'Server error' }));
         }
       });
       return;
     }
 
-    // Static files
+    // Static files (optional if you add admin.html in this repo)
     try {
       let filePath = path.join(__dirname, url.pathname === '/' ? 'index.html' : url.pathname);
       const data = await fs.readFile(filePath);
@@ -316,7 +303,7 @@ async function startServer() {
       else if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg')) contentType = 'image/jpeg';
       res.setHeader('Content-Type', contentType);
       res.writeHead(200).end(data);
-    } catch (err) {
+    } catch {
       res.writeHead(404).end('<h1>404 Not Found</h1>');
     }
   });

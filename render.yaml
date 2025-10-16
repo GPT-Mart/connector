@@ -3,13 +3,14 @@ services:
     name: gptmart-api
     env: node
     plan: free
-    region: oregon
     buildCommand: ""
     startCommand: "node server.js"
     envVars:
       - key: ADMIN_PIN
-        value: 4545              # <- change to your secret in the UI later
+        value: "4545"   # change in dashboard later if you prefer
+      - key: DATA_DIR
+        value: "/data"
     disk:
       name: db
-      mountPath: /opt/render/project/src
+      mountPath: /data
       sizeGB: 1

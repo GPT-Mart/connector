@@ -12,7 +12,8 @@ async function startServer() {
   // --- CONFIG ---
   const PORT = process.env.PORT || 3000;
   const ADMIN_PIN = (process.env.ADMIN_PIN || '4545').trim();
-  const DB_PATH = path.join(__dirname, 'db.json');
+  const DATA_DIR = process.env.DATA_DIR || __dirname;
+  const DB_PATH = path.join(DATA_DIR, 'db.json');
 
   // --- DB HELPERS ---
   async function readDB() {
@@ -133,11 +134,20 @@ async function startServer() {
     return crypto.timingSafeEqual(a, b);
   }
 
-  // parse body helper (JSON or form)
-  function parseBody(req) {
+  // parse body helper (JSON or form) with size limit
+  function parseBody(req, maxBytes = 2_500_000) {
     return new Promise((resolve, reject) => {
       let body = '';
-      req.on('data', chunk => (body += chunk.toString()));
+      let size = 0;
+      req.on('data', chunk => {
+        size += chunk.length;
+        if (size > maxBytes) {
+          reject(new Error('Payload too large'));
+          req.destroy();
+          return;
+        }
+        body += chunk.toString();
+      });
       req.on('end', () => {
         const ct = (req.headers['content-type'] || '').toLowerCase();
         try {
@@ -154,14 +164,24 @@ async function startServer() {
   }
 
   // CORS helper
-function setCORS(req, res) {
-  const origin = req.headers.origin || 'https://www.gptmrt.com'; // ✅ fallback to your domain
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-}
+  function setCORS(req, res) {
+    const origin = req.headers.origin || 'https://www.gptmrt.com';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+
+  // simple IP rate-limit store for /api/gpts/submit
+  const submitHits = new Map();
+  function allowSubmit(ip) {
+    const now = Date.now(), windowMs = 5 * 60 * 1000, maxHits = 5;
+    const arr = (submitHits.get(ip) || []).filter(ts => now - ts < windowMs);
+    if (arr.length >= maxHits) return false;
+    arr.push(now); submitHits.set(ip, arr);
+    return true;
+  }
 
   // --- SERVER ---
   const server = http.createServer(async (req, res) => {
@@ -190,25 +210,22 @@ function setCORS(req, res) {
     if (url.pathname.startsWith('/api/')) {
       res.setHeader('Content-Type', 'application/json');
 
-      // LOGIN (accept JSON or form) — cross-site cookie enabled
+      // LOGIN
       if (url.pathname === '/api/login' && method === 'POST') {
         try {
           const body = await parseBody(req);
           const pin = body.pin ?? body.PIN ?? body.passcode ?? body.password ?? '';
           if (checkPin(pin)) {
             const token = createToken({ user: 'admin' });
-
-            // Always send cross-site capable cookie
             const cookie = [
               `session=${encodeURIComponent(token)}`,
               'HttpOnly',
               'Path=/',
-              'SameSite=None',  // <-- allow cross-site
-              'Secure',         // <-- required with SameSite=None
+              'SameSite=None',
+              'Secure',
               'Max-Age=3600'
             ].join('; ');
             res.setHeader('Set-Cookie', cookie);
-
             res.writeHead(200).end(JSON.stringify({ success: true, token }));
           } else {
             res.writeHead(401).end(JSON.stringify({ error: 'Invalid PIN' }));
@@ -220,25 +237,59 @@ function setCORS(req, res) {
       }
 
       // PUBLIC LIST (no auth)
- if (url.pathname === '/api/gpts/public' && method === 'GET') {
-  console.log('Public API hit from:', req.headers.origin || '(no origin)');
-  const db = await readDB();
-  const publicItems = db.items.filter(i => i.status === 'live');
-  res.writeHead(200).end(JSON.stringify({ settings: db.settings, items: publicItems }));
-  return;
-}
+      if (url.pathname === '/api/gpts/public' && method === 'GET') {
+        const db = await readDB();
+        const publicItems = db.items.filter(i => i.status === 'live');
+        res.writeHead(200).end(JSON.stringify({ settings: db.settings, items: publicItems }));
+        return;
+      }
 
+      // PUBLIC SUBMIT (no auth) -> creates pending item
+      if (url.pathname === '/api/gpts/submit' && method === 'POST') {
+        try {
+          const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+          if (!allowSubmit(ip)) { res.writeHead(429).end(JSON.stringify({ error: 'Too many submissions. Try later.' })); return; }
 
-      // AUTH (cookie or bearer)
+          const body = await parseBody(req, 2_500_000);
+          const title = String(body.title || '').trim().slice(0, 120);
+          const urlStr = String(body.url || '').trim().slice(0, 1000);
+          const icon = String(body.icon || '').trim().slice(0, 1_500_000);
+          const desc = String(body.desc || '').trim().slice(0, 800);
+          const categories = Array.isArray(body.categories) ? body.categories.slice(0, 10).map(s=>String(s).trim().slice(0,40)) : [];
+          const tags = Array.isArray(body.tags) ? body.tags.slice(0, 20).map(s=>String(s).trim().slice(0,32)) : [];
+
+          if (!title) { res.writeHead(400).end(JSON.stringify({ error:'Title is required' })); return; }
+          if (!/^https:\/\/chatgpt\.com\/g\//i.test(urlStr)) { res.writeHead(400).end(JSON.stringify({ error:'ChatGPT link must start with https://chatgpt.com/g/...' })); return; }
+          if (icon && !(/^data:image\/(png|jpeg|webp);base64,/i.test(icon) || /^https?:\/\//i.test(icon))) {
+            res.writeHead(400).end(JSON.stringify({ error:'Icon must be an http(s) URL or data:image/*;base64 URL' })); return;
+          }
+
+          const db = await readDB();
+          const item = {
+            id: uuidv4(),
+            title, url: urlStr, icon, desc,
+            categories, tags,
+            featured: false,
+            status: 'pending',
+            createdAt: Date.now(),
+            submittedBy: ip
+          };
+          db.items.push(item);
+          await writeDB(db);
+          res.writeHead(201).end(JSON.stringify({ success:true, id:item.id }));
+        } catch (e) {
+          res.writeHead(500).end(JSON.stringify({ error:'Server error' }));
+        }
+        return;
+      }
+
+      // AUTH (cookie or bearer) for admin routes
       const authHeader = req.headers['authorization'];
       const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-
-      // parse cookie header for "session="
       const cookieHeader = req.headers.cookie || '';
       const cookieTok = cookieHeader.split(';').map(s => s.trim())
         .map(kv => kv.split('='))
         .reduce((acc,[k,v]) => (k==='session' ? decodeURIComponent(v||'') : acc), null);
-
       const user = verifyTokenValue(bearer || cookieTok);
       if (!user) { res.writeHead(401).end(JSON.stringify({ error: 'Unauthorized' })); return; }
 
@@ -292,9 +343,9 @@ function setCORS(req, res) {
       return;
     }
 
-    // Static files (optional if you add admin.html in this repo)
+    // Static files
     try {
-      let filePath = path.join(__dirname, url.pathname === '/' ? 'index.html' : url.pathname);
+      const filePath = path.join(__dirname, url.pathname === '/' ? 'index.html' : url.pathname);
       const data = await fs.readFile(filePath);
       let contentType = 'text/html; charset=utf-8';
       if (filePath.endsWith('.js')) contentType = 'application/javascript; charset=utf-8';

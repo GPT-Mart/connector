@@ -5,13 +5,12 @@ const path = require('path');
 const crypto = require('crypto');
 const querystring = require('querystring');
 
-// --- ASYNC BOOTSTRAP ---
 async function startServer() {
   const { v4: uuidv4 } = await import('uuid');
 
   // --- CONFIG ---
   const PORT = process.env.PORT || 3000;
-  const HOST = '0.0.0.0'; // FIX: Listen on all network interfaces for Render
+  const HOST = '0.0.0.0';                 // listen on all interfaces (Render/Fly/etc.)
   const ADMIN_PIN = (process.env.ADMIN_PIN || '4545').trim();
   const DATA_DIR = process.env.DATA_DIR || __dirname;
   const DB_PATH = path.join(DATA_DIR, 'db.json');
@@ -24,12 +23,12 @@ async function startServer() {
     } catch {
       // Seed on first run
       const allGpts = [
-        // ... (all your GPT items are here, truncated for brevity) ...
+        /* … your seeded items … */
         { title:"Bug Meme GPT", desc:"Turns bugs into instant memes.", icon:"https://cdn-icons-png.flaticon.com/512/3221/3221614.png", categories:["Humor","Tools"], url:"https://chatgpt.com/g/g-68dab3b8cebc819180d1b629ab574579-bug-meme-gpt?model=gpt-5"}
       ];
       const formattedGpts = allGpts.map(item => ({
         id: uuidv4(),
-        createdAt: Date.now() - Math.floor(Math.random() * 1000000),
+        createdAt: Date.now() - Math.floor(Math.random() * 1_000_000),
         status: 'hidden',
         featured: false,
         title: item.title || item.name,
@@ -39,7 +38,6 @@ async function startServer() {
         tags: item.tags || [],
         url: item.url,
       }));
-      // NEW: Added leads: [] to the default database structure
       const defaultData = { settings: { title: "GPTMart" }, items: formattedGpts, leads: [] };
       await writeDB(defaultData);
       return defaultData;
@@ -91,11 +89,7 @@ async function startServer() {
       let size = 0;
       req.on('data', chunk => {
         size += chunk.length;
-        if (size > maxBytes) {
-          reject(new Error('Payload too large'));
-          req.destroy();
-          return;
-        }
+        if (size > maxBytes) { reject(new Error('Payload too large')); req.destroy(); return; }
         body += chunk.toString();
       });
       req.on('end', () => {
@@ -103,10 +97,7 @@ async function startServer() {
         try {
           if (ct.includes('application/json')) resolve(JSON.parse(body || '{}'));
           else if (ct.includes('application/x-www-form-urlencoded')) resolve(querystring.parse(body));
-          else {
-            try { resolve(JSON.parse(body || '{}')); }
-            catch { resolve({ raw: body }); }
-          }
+          else { try { resolve(JSON.parse(body || '{}')); } catch { resolve({ raw: body }); } }
         } catch (e) { reject(e); }
       });
       req.on('error', reject);
@@ -123,7 +114,7 @@ async function startServer() {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
 
-  // simple IP rate-limit store for /api/gpts/submit
+  // simple IP rate-limit store for submissions
   const submitHits = new Map();
   function allowSubmit(ip) {
     const now = Date.now(), windowMs = 5 * 60 * 1000, maxHits = 5;
@@ -132,17 +123,14 @@ async function startServer() {
     arr.push(now); submitHits.set(ip, arr);
     return true;
   }
-
-  // NEW: IP rate-limit for /api/leads/create
   const leadHits = new Map();
   function allowLeadSubmit(ip) {
-    const now = Date.now(), windowMs = 5 * 60 * 1000, maxHits = 5; // 5 requests per 5 mins
+    const now = Date.now(), windowMs = 5 * 60 * 1000, maxHits = 5;
     const arr = (leadHits.get(ip) || []).filter(ts => now - ts < windowMs);
     if (arr.length >= maxHits) return false;
     arr.push(now); leadHits.set(ip, arr);
     return true;
   }
-
 
   // --- SERVER ---
   const server = http.createServer(async (req, res) => {
@@ -160,14 +148,13 @@ async function startServer() {
       return;
     }
 
-    // Health check
+    // Health
     if (url.pathname === '/api/health' && method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-         .end(JSON.stringify({ ok: true }));
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
       return;
     }
 
-    // API routes
+    // API
     if (url.pathname.startsWith('/api/')) {
       res.setHeader('Content-Type', 'application/json');
 
@@ -180,11 +167,7 @@ async function startServer() {
             const token = createToken({ user: 'admin' });
             const cookie = [
               `session=${encodeURIComponent(token)}`,
-              'HttpOnly',
-              'Path=/',
-              'SameSite=None',
-              'Secure',
-              'Max-Age=3600'
+              'HttpOnly', 'Path=/', 'SameSite=None', 'Secure', 'Max-Age=3600'
             ].join('; ');
             res.setHeader('Set-Cookie', cookie);
             res.writeHead(200).end(JSON.stringify({ success: true, token }));
@@ -197,7 +180,7 @@ async function startServer() {
         return;
       }
 
-      // PUBLIC LIST (no auth)
+      // PUBLIC LIST
       if (url.pathname === '/api/gpts/public' && method === 'GET') {
         const db = await readDB();
         const publicItems = db.items.filter(i => i.status === 'live');
@@ -205,33 +188,20 @@ async function startServer() {
         return;
       }
 
-      // --- NEW: PUBLIC LEAD SUBMISSION (no auth) ---
+      // PUBLIC LEAD SUBMISSION
       if (url.pathname === '/api/leads/create' && method === 'POST') {
         try {
           const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
           if (!allowLeadSubmit(ip)) { res.writeHead(429).end(JSON.stringify({ error: 'Too many submissions. Try later.' })); return; }
-
-          const body = await parseBody(req, 10000); // 10kb limit
+          const body = await parseBody(req, 10_000);
           const email = String(body.email || '').trim().slice(0, 100);
           const message = String(body.message || '').trim().slice(0, 500);
-          
-          // Basic email regex for server-side validation
           const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-          if (!email || !emailRegex.test(email)) {
-            res.writeHead(400).end(JSON.stringify({ error:'A valid email is required' })); return;
-          }
-
+          if (!email || !emailRegex.test(email)) { res.writeHead(400).end(JSON.stringify({ error:'A valid email is required' })); return; }
           const db = await readDB();
-          const lead = {
-            id: uuidv4(),
-            createdAt: Date.now(),
-            email,
-            message,
-            ip
-          };
-          
-          if (!db.leads) db.leads = []; // Ensure array exists
-          db.leads.unshift(lead); // Add to top of the list
+          const lead = { id: uuidv4(), createdAt: Date.now(), email, message, ip };
+          if (!db.leads) db.leads = [];
+          db.leads.unshift(lead);
           await writeDB(db);
           res.writeHead(201).end(JSON.stringify({ success:true, id:lead.id }));
         } catch (e) {
@@ -241,47 +211,7 @@ async function startServer() {
         return;
       }
 
-
-      // PUBLIC SUBMIT (no auth) -> creates pending item
-      if (url.pathname === '/api/gpts/submit' && method === 'POST') {
-        try {
-          const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
-          if (!allowSubmit(ip)) { res.writeHead(429).end(JSON.stringify({ error: 'Too many submissions. Try later.' })); return; }
-
-          const body = await parseBody(req, 2_500_000);
-          const title = String(body.title || '').trim().slice(0, 120);
-          const urlStr = String(body.url || '').trim().slice(0, 1000);
-          const icon = String(body.icon || '').trim().slice(0, 1_500_000);
-          const desc = String(body.desc || '').trim().slice(0, 800);
-          const categories = Array.isArray(body.categories) ? body.categories.slice(0, 10).map(s=>String(s).trim().slice(0,40)) : [];
-          const tags = Array.isArray(body.tags) ? body.tags.slice(0, 20).map(s=>String(s).trim().slice(0,32)) : [];
-
-          if (!title) { res.writeHead(400).end(JSON.stringify({ error:'Title is required' })); return; }
-          if (!/^https:\/\/chatgpt\.com\/g\//i.test(urlStr)) { res.writeHead(400).end(JSON.stringify({ error:'ChatGPT link must start with https://chatgpt.com/g/...' })); return; }
-          if (icon && !(/^data:image\/(png|jpeg|webp);base64,/i.test(icon) || /^https?:\/\//i.test(icon))) {
-            res.writeHead(400).end(JSON.stringify({ error:'Icon must be an http(s) URL or data:image/*;base64 URL' })); return;
-          }
-
-          const db = await readDB();
-          const item = {
-            id: uuidv4(),
-            title, url: urlStr, icon, desc,
-            categories, tags,
-            featured: false,
-            status: 'pending',
-            createdAt: Date.now(),
-            submittedBy: ip
-          };
-          db.items.push(item);
-          await writeDB(db);
-          res.writeHead(201).end(JSON.stringify({ success:true, id:item.id }));
-        } catch (e) {
-          res.writeHead(500).end(JSON.stringify({ error:'Server error' }));
-        }
-        return;
-      }
-
-      // AUTH (cookie or bearer) for admin routes
+      // --- AUTH (cookie or bearer) ---
       const authHeader = req.headers['authorization'];
       const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
       const cookieHeader = req.headers.cookie || '';
@@ -291,15 +221,32 @@ async function startServer() {
       const user = verifyTokenValue(bearer || cookieTok);
       if (!user) { res.writeHead(401).end(JSON.stringify({ error: 'Unauthorized' })); return; }
 
-      // Mutating / admin routes
+      // --- ADMIN ROUTES ---
       const db = await readDB();
 
       if (url.pathname === '/api/gpts/all' && method === 'GET') {
-        // This endpoint now returns items AND leads
+        // returns items + settings + (now also) leads
         res.writeHead(200).end(JSON.stringify(db));
         return;
       }
 
+      // NEW: leads listing (auth)
+      if (url.pathname === '/api/leads' && method === 'GET') {
+        res.writeHead(200).end(JSON.stringify({ items: db.leads || [] }));
+        return;
+      }
+
+      // OPTIONAL: delete a lead
+      if (url.pathname.startsWith('/api/leads/delete/') && method === 'DELETE') {
+        const id = path.basename(url.pathname);
+        const before = (db.leads || []).length;
+        db.leads = (db.leads || []).filter(l => l.id !== id);
+        if (db.leads.length < before) { await writeDB(db); res.writeHead(204).end(); }
+        else { res.writeHead(404).end(JSON.stringify({ error:'Lead not found' })); }
+        return;
+      }
+
+      // Items CRUD
       let body = '';
       req.on('data', chunk => (body += chunk.toString()));
       req.on('end', async () => {
@@ -326,12 +273,8 @@ async function startServer() {
             const id = path.basename(url.pathname);
             const initial = db.items.length;
             db.items = db.items.filter(i => i.id !== id);
-            if (db.items.length < initial) {
-              await writeDB(db);
-              res.writeHead(204).end();
-            } else {
-              res.writeHead(404).end(JSON.stringify({ error: 'Item not found' }));
-            }
+            if (db.items.length < initial) { await writeDB(db); res.writeHead(204).end(); }
+            else { res.writeHead(404).end(JSON.stringify({ error: 'Item not found' })); }
           } else {
             res.writeHead(404).end(JSON.stringify({ error: 'API route not found' }));
           }
@@ -344,7 +287,9 @@ async function startServer() {
 
     // Static files (for local testing)
     try {
-      const filePath = path.join(__dirname, url.pathname === '/' ? 'index.html' : url.pathname);
+      // very small hardening: prevent path traversal
+      const safe = path.normalize(url.pathname).replace(/^(\.\.[/\\])+/, '');
+      const filePath = path.join(__dirname, safe === '/' ? 'index.html' : safe);
       const data = await fs.readFile(filePath);
       let contentType = 'text/html; charset=utf-8';
       if (filePath.endsWith('.js')) contentType = 'application/javascript; charset=utf-8';
@@ -360,7 +305,6 @@ async function startServer() {
     }
   });
 
-  // FIX: Listen on HOST (0.0.0.0) for Render
   server.listen(PORT, HOST, () => {
     console.log(`✅ Server running at http://${HOST}:${PORT}/`);
   });
